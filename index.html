@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SmartSafe — Live Safety Detection</title>
+
+    <!-- socket.io client lib -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+
+    <style>
+        /* ── base reset & layout ────────────────────── */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, sans-serif;
+            background: #1a1a2e;
+            color: #eaeaea;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* ── top banner ─────────────────────────────── */
+        .top-banner {
+            width: 100%;
+            background: linear-gradient(135deg, #16213e 0%, #0f3460 100%);
+            padding: 18px 12px;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }
+        .top-banner h1 {
+            font-size: 1.6rem;
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+        }
+        .top-banner p {
+            font-size: 0.85rem;
+            opacity: 0.75;
+        }
+
+        /* ── feed panels ────────────────────────────── */
+        .feed-area {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 30px;
+            padding: 0 16px;
+        }
+        .panel {
+            position: relative;
+            background: #16213e;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+        }
+        .panel-label {
+            position: absolute;
+            top: 8px; left: 10px;
+            background: rgba(0,0,0,0.55);
+            padding: 3px 10px;
+            border-radius: 6px;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            z-index: 2;
+        }
+
+        #live-cam,
+        #detection-output {
+            width: 480px;
+            height: 360px;
+            object-fit: cover;
+            display: block;
+            background: #0d1117;
+        }
+
+        /* ── controls ───────────────────────────────── */
+        .btn-row {
+            margin: 24px 0 40px;
+            display: flex;
+            gap: 14px;
+        }
+        .btn {
+            border: none;
+            padding: 12px 28px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+        .btn:active { transform: scale(0.96); }
+        .btn-start {
+            background: #00b894;
+            color: #fff;
+        }
+        .btn-start:hover { box-shadow: 0 0 14px rgba(0,184,148,0.5); }
+        .btn-stop {
+            background: #d63031;
+            color: #fff;
+        }
+        .btn-stop:hover { box-shadow: 0 0 14px rgba(214,48,49,0.5); }
+
+        /* ── status indicator ───────────────────────── */
+        #status-line {
+            font-size: 0.82rem;
+            opacity: 0.6;
+            margin-bottom: 12px;
+        }
+
+        /* ── responsive tweak ───────────────────────── */
+        @media (max-width: 720px) {
+            #live-cam, #detection-output { width: 92vw; height: auto; }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="top-banner">
+        <h1>🛡️ SmartSafe — Live Safety Monitor</h1>
+        <p>Real-time helmet &amp; package detection using deep learning</p>
+    </div>
+
+    <div class="feed-area">
+        <!-- raw webcam feed -->
+        <div class="panel">
+            <span class="panel-label">📷 Camera Feed</span>
+            <video id="live-cam" autoplay playsinline muted></video>
+        </div>
+
+        <!-- processed / annotated output -->
+        <div class="panel" id="output-panel" style="display:none;">
+            <span class="panel-label">🟢 Detection Output</span>
+            <img id="detection-output" alt="Processed feed" />
+        </div>
+    </div>
+
+    <p id="status-line">Camera is off</p>
+
+    <div class="btn-row">
+        <button class="btn btn-start" id="btn-go">▶ Start Camera</button>
+        <button class="btn btn-stop"  id="btn-halt">■ Stop Camera</button>
+    </div>
+
+    <script>
+    (function () {
+        "use strict";
+
+        /* ── dom refs ───────────────────────────────── */
+        var camEl      = document.getElementById("live-cam");
+        var outputEl   = document.getElementById("detection-output");
+        var outputWrap = document.getElementById("output-panel");
+        var statusTxt  = document.getElementById("status-line");
+        var btnGo      = document.getElementById("btn-go");
+        var btnHalt    = document.getElementById("btn-halt");
+
+        /* ── socket connection ──────────────────────── */
+        var channel = io("http://localhost:5000");
+
+        /* ── state ──────────────────────────────────── */
+        var activeStream = null;
+        var captureTimer = null;
+
+        /* ── capture settings ───────────────────────── */
+        var FRAME_W        = 640;
+        var FRAME_H        = 480;
+        var SEND_INTERVAL  = 750;   // ms between frames
+
+        /* ── helpers ────────────────────────────────── */
+        function setStatus(msg) { statusTxt.textContent = msg; }
+
+        function grabAndSend() {
+            var scratch = document.createElement("canvas");
+            var ctx     = scratch.getContext("2d");
+            scratch.width  = FRAME_W;
+            scratch.height = FRAME_H;
+
+            captureTimer = setInterval(function () {
+                ctx.drawImage(camEl, 0, 0, FRAME_W, FRAME_H);
+                var jpeg = scratch.toDataURL("image/jpeg", 0.8);
+                channel.emit("video_frame", jpeg);
+            }, SEND_INTERVAL);
+        }
+
+        /* ── start / stop handlers ──────────────────── */
+        function beginCapture() {
+            navigator.mediaDevices.getUserMedia({ video: true })
+                .then(function (stream) {
+                    activeStream    = stream;
+                    camEl.srcObject = stream;
+                    setStatus("Camera active — streaming to server …");
+                    grabAndSend();
+                })
+                .catch(function () {
+                    alert("Could not access the webcam. Check browser permissions.");
+                });
+        }
+
+        function endCapture() {
+            if (captureTimer) { clearInterval(captureTimer); captureTimer = null; }
+            if (activeStream) {
+                activeStream.getTracks().forEach(function (t) { t.stop(); });
+                activeStream    = null;
+                camEl.srcObject = null;
+            }
+            outputWrap.style.display = "none";
+            setStatus("Camera is off");
+        }
+
+        /* ── processed frame from server ────────────── */
+        channel.on("processed_frame", function (imgData) {
+            outputEl.src = imgData;
+            outputWrap.style.display = "block";
+        });
+
+        /* ── bind buttons ───────────────────────────── */
+        btnGo.addEventListener("click", beginCapture);
+        btnHalt.addEventListener("click", endCapture);
+    })();
+    </script>
+</body>
+</html>
