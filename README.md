@@ -1,4 +1,4 @@
-# SmartSafe — Live Safety Detection System
+# SmartSafe-Object-Detection
 
 **Author:** Shlok Dhanokar
 
@@ -58,8 +58,6 @@ shutil.copy("runs/detect/train/weights/best.pt", "./best.pt")
 ├── server.py        # Flask-SocketIO backend with YOLO inference
 ├── index.html       # Frontend webcam capture & display
 ├── best.pt          # Custom trained weights (user-provided)
-├── Helmet.png       # Sample reference image
-├── carton-box.png   # Sample reference image
 └── README.md
 ```
 
